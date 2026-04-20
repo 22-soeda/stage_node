@@ -1,73 +1,109 @@
-import time
-import zmq
+"""
+stage_node: ZMQ PUB (STAGE topic) + REP (commands).
+
+Compatible with sequence_node NodeClient: cmd/get_status style JSON.
+"""
+
+from __future__ import annotations
+
 import json
 import queue
+import threading
+import time
 
-# coreパッケージから設定を読み込む
-from core import network_config
-from core import message_config
+import zmq
 
-from .stage_controller import StageController
-from .terminal_handler import TerminalHandler
+from core import message_config as msg
+from core import network_config as net
+
+from stage_node.stage_controller import StageController
+from stage_node.terminal_handler import TerminalHandler
+
 
 class StageNode:
-    """ZMQ通信とステージノードのメインループを管理するクラス"""
-    def __init__(self):
-        self.context = zmq.Context()
-        
-        # ステータス配信ソケット
-        self.pub_socket = self.context.socket(zmq.PUB)
-        self.pub_socket.bind(network_config.ZMQ_URL_STAGE_PUB)
+    def __init__(self, interval_ms: int = 200, dummy: bool = True, port: str = "COM3"):
+        self._interval_ms = interval_ms
+        self._running = False
+        self._start_time = 0.0
+        self._controller = StageController(dummy=dummy, port=port)
+        self._cmd_queue: queue.Queue = queue.Queue()
+        self._pub_queue: queue.Queue = queue.Queue()
+        self._terminal = TerminalHandler(self._cmd_queue)
 
-        # コマンド受信ソケット
-        self.sub_socket = self.context.socket(zmq.SUB)
-        self.sub_socket.bind(network_config.ZMQ_URL_STAGE_SUB)
-        self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "") 
+        self._ctx = zmq.Context()
+        self._pub = self._ctx.socket(zmq.PUB)
+        self._pub.bind(net.bind_addr(net.STAGE_PUB_PORT))
+        self._rep = self._ctx.socket(zmq.REP)
+        self._rep.bind(net.bind_addr(net.STAGE_CMD_PORT))
 
-        # 内部コンポーネントの初期化
-        self.cmd_queue = queue.Queue()
-        self.stage_ctrl = StageController()
-        self.terminal = TerminalHandler(self.cmd_queue)
+    def run(self) -> None:
+        self._running = True
+        self._start_time = time.time()
 
-    def run(self):
-        print(f"Stage Node Started.")
-        print(f"  Listening for commands on: {network_config.ZMQ_URL_STAGE_SUB}")
-        print(f"  Publishing status on:      {network_config.ZMQ_URL_STAGE_PUB}")
-        print(f"  Publishing topic:          {message_config.TOPIC_STAGE_STATUS.decode()}")
-        
-        # ターミナル入力の待ち受けスレッドを開始
-        self.terminal.start()
-        
+        threading.Thread(target=self._measure_loop, daemon=True, name="stage-pub").start()
+        self._terminal.start()
+
+        poller = zmq.Poller()
+        poller.register(self._rep, zmq.POLLIN)
+
+        print(
+            f"[stage_node] Running.\n"
+            f"  PUB  {net.bind_addr(net.STAGE_PUB_PORT)}  topic={msg.TOPIC_STAGE.decode()}\n"
+            f"  REP  {net.bind_addr(net.STAGE_CMD_PORT)}\n",
+            flush=True,
+        )
+
         try:
             while True:
-                # 1. ターミナル入力からのコマンド処理
-                while not self.cmd_queue.empty():
-                    cmd = self.cmd_queue.get_nowait()
-                    self.stage_ctrl.handle_command(cmd)
+                while not self._pub_queue.empty():
+                    payload = self._pub_queue.get_nowait()
+                    self._pub.send_multipart(
+                        [msg.TOPIC_STAGE, json.dumps(payload).encode()]
+                    )
 
-                # 2. ZMQネットワークからのコマンド処理 (ノンブロッキング)
-                try:
-                    cmd_json = self.sub_socket.recv_string(flags=zmq.NOBLOCK)
-                    cmd = json.loads(cmd_json)
-                    self.stage_ctrl.handle_command(cmd)
-                except zmq.Again:
-                    pass
-                except Exception as e:
-                    print(f"[Node] Failed to parse ZMQ command: {e}")
+                while not self._cmd_queue.empty():
+                    cmd = self._cmd_queue.get_nowait()
+                    resp = self._controller.handle_command(cmd)
+                    self._print_response(resp)
 
-                # 3. ステータス（座標など）の取得と配信
-                status = self.stage_ctrl.get_status()
-                self.pub_socket.send(message_config.TOPIC_STAGE_STATUS, zmq.SNDMORE)
-                # JSONとしてシリアライズして送信（GUIノード等で扱いやすくするため）
-                self.pub_socket.send_json(status)
-
-                # ステージのステータス更新はカメラほど高頻度である必要がないため、少し長めのsleepでも可
-                time.sleep(0.01)
+                events = dict(poller.poll(10))
+                if self._rep in events:
+                    raw = self._rep.recv()
+                    cmd = json.loads(raw.decode())
+                    resp = self._controller.handle_command(cmd)
+                    self._rep.send(json.dumps(resp).encode())
 
         except KeyboardInterrupt:
-            print("\nShutting down Stage Node...")
+            print("\n[stage_node] Shutting down...", flush=True)
         finally:
-            self.stage_ctrl.cleanup()
-            self.pub_socket.close()
-            self.sub_socket.close()
-            self.context.term()
+            self._running = False
+            self._controller.cleanup()
+            self._pub.close()
+            self._rep.close()
+            self._ctx.term()
+
+    @staticmethod
+    def _print_response(resp: dict) -> None:
+        if resp.get("status") == "error":
+            print(f"[Error] {resp.get('error')}", flush=True)
+        else:
+            items = {k: v for k, v in resp.items() if k != "status"}
+            if items:
+                print(f"[OK] {items}", flush=True)
+
+    def _measure_loop(self) -> None:
+        interval = self._interval_ms / 1000.0
+        while self._running:
+            snap = self._controller.get_snapshot()
+            now = time.time()
+            connected = snap.get("connected", False)
+            node_status = "measuring" if connected else "idle"
+            self._pub_queue.put(
+                {
+                    "timestamp": now,
+                    "elapsed": now - self._start_time,
+                    **snap,
+                    "node_status": node_status,
+                }
+            )
+            time.sleep(interval)

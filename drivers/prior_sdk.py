@@ -55,13 +55,16 @@ class PriorSdk(AbstractStage):
         
         self._connected = False
 
-    def move_abs(self, x: float, y: float) -> None:
+    def move_abs(self, x: float, y: float, z: float = 0.0) -> None:
         if not self._connected or not self.helper:
             raise StageError("Priorステージに接続されていません。")
-            
+
+        if z != 0.0:
+            print("[PriorSdk] Z 軸は非対応のため z は無視されます。")
+
         x_microns = x * 1000.0
         y_microns = y * 1000.0
-            
+
         print(f"[PriorSdk] Move command sent (mm: {x:.3f}, {y:.3f})...")
         try:
             # helper側がノンブロッキングになったため、指示を出してすぐ戻ってくる
@@ -69,20 +72,22 @@ class PriorSdk(AbstractStage):
         except Exception as e:
             raise StageError(f"Priorステージ移動エラー: {e}")
 
-    def move_rel(self, dx: float, dy: float) -> None:
+    def move_rel(self, dx: float, dy: float, dz: float = 0.0) -> None:
         if not self._connected or not self.helper:
             raise StageError("Priorステージに接続されていません。")
-            
-        current_x_mm, current_y_mm = self.get_position()
-        self.move_abs(current_x_mm + dx, current_y_mm + dy)
 
-    def get_position(self) -> tuple[float, float]:
+        if dz != 0.0:
+            print("[PriorSdk] Z 軸は非対応のため dz は無視されます。")
+        current_x_mm, current_y_mm, _z = self.get_position()
+        self.move_abs(current_x_mm + dx, current_y_mm + dy, 0.0)
+
+    def get_position(self) -> tuple[float, float, float]:
         if not self._connected or not self.helper:
             raise StageError("Priorステージに接続されていません。")
-            
+
         try:
             x_microns, y_microns = self.helper.get_position()
-            return (x_microns / 1000.0, y_microns / 1000.0)
+            return (x_microns / 1000.0, y_microns / 1000.0, 0.0)
         except Exception as e:
             raise StageError(f"Priorステージ位置取得エラー: {e}")
 
