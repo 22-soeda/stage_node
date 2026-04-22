@@ -162,8 +162,23 @@ class Hsc103Stage(AbstractStage):
             raise StageError("HSC-103 に接続されていません。")
 
         self.wait_for_move()
-        self._origin_steps = self._query_steps()
-        print(f"[Hsc103Stage] Origin set (steps={self._origin_steps}).")
+        self._set_logical_origin_all_axes()
+
+        # R コマンド後はコントローラ内部座標が原点(0,0,0)になる前提。
+        # 少し待って Q: でゼロ化を確認し、アプリ側の原点基準も一致させる。
+        deadline = time.monotonic() + 2.0
+        last = (0, 0, 0)
+        while time.monotonic() < deadline:
+            last = self._query_steps()
+            if last == (0, 0, 0):
+                self._origin_steps = (0, 0, 0)
+                print("[Hsc103Stage] Origin set (controller/app = 0,0,0).")
+                return
+            time.sleep(0.02)
+
+        raise StageError(
+            f"HSC-103 logical origin reset did not settle to zero: steps={last}"
+        )
 
     def is_moving(self) -> bool:
         return self._moving
@@ -243,6 +258,18 @@ class Hsc103Stage(AbstractStage):
     def _query_steps(self) -> tuple[int, int, int]:
         with self._lock:
             return self._query_steps_unlocked()
+
+    def _set_logical_origin_all_axes(self) -> None:
+        with self._lock:
+            if not self._ser:
+                raise StageError("シリアルが開いていません。")
+            self._ser.write(b"R:1,1,1\r\n")
+            line = self._ser.readline()
+        if not line:
+            raise StageError("R: 応答が空です。")
+        s = line.decode(errors="replace").strip().upper()
+        if "NG" in s:
+            raise StageError(f"R: が NG を返しました: {s!r}")
 
     @staticmethod
     def _parse_q_line(line: bytes) -> tuple[int, int, int]:

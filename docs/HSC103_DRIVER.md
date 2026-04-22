@@ -18,7 +18,7 @@ SIGMA KOKI 製 **HSC-103** コントローラ向けの Python 実装です。実
 | `move_abs(x,y,z)` | `A:tx,ty,tz` で絶対ステップ移動（論理 mm から目標ステップを計算） |
 | `move_rel(dx,dy,dz)` | 現在ステップを `Q:` で取得し、`M:rx,ry,rz` で相対移動 |
 | `get_position()` | `Q:` のステップから論理 mm を算出 |
-| `set_origin()` | 現在ステップを新しい `_origin_steps` に設定（以降の mm はここを 0 とみなす） |
+| `set_origin()` | `R:1,1,1` で**コントローラ内部の論理原点を 0** に設定し、`Q:` で 0,0,0 を確認 |
 | `is_moving()` / `wait_for_move()` | 移動スレッドの状態・完了待ち |
 
 未接続時は `StageError`、接続失敗時は `StageConnectionError` が送出されます。

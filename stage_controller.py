@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Any
 
+from stage_node.drivers.abstract_stage import AbstractStage
 from stage_node.drivers.dummy_stage import DummyStage
 from stage_node.exceptions import StageConnectionError
 
@@ -22,11 +23,13 @@ class StageController:
         self._dummy_mode = dummy
         self._port = port
         self._lock = threading.Lock()
-        self._driver: DummyStage | None = None
+        self._driver: AbstractStage | None = None
+        self._driver_name = "none"
 
         if self._dummy_mode:
             self._driver = DummyStage()
             self._driver.connect()
+            self._driver_name = "dummy"
 
     def handle_command(self, cmd: dict[str, Any]) -> dict[str, Any]:
         action = (cmd.get("action") or cmd.get("cmd") or "").lower()
@@ -54,36 +57,31 @@ class StageController:
 
         return {"status": "error", "error": f"Unknown command: {action!r}"}
 
-    def _ensure_dummy_connected(self) -> tuple[bool, dict[str, Any] | None]:
-        if not self._dummy_mode:
+    def _ensure_connected(self) -> tuple[bool, dict[str, Any] | None]:
+        if self._driver is None or not self._driver.is_connected():
             return False, {
                 "status": "error",
-                "error": "Hardware stage not implemented yet (omit --no-dummy for DummyStage)",
+                "error": "Not connected (use: connect dummy|prior|hsc103 <port>)",
             }
-        if self._driver is None or not self._driver.is_connected():
-            return False, {"status": "error", "error": "Not connected (use: connect dummy)"}
         return True, None
 
     def _handle_connect(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        driver = (cmd.get("driver") or "dummy").lower()
+        driver = self._normalize_driver_name((cmd.get("driver") or "dummy").lower())
         self._port = str(cmd.get("port") or self._port)
-
-        if not self._dummy_mode:
-            return {"status": "error", "error": "Hardware connect not implemented"}
-
-        if driver not in ("dummy", "mock"):
-            return {"status": "error", "error": f"Driver not implemented: {driver!r} (use dummy)"}
 
         try:
             with self._lock:
                 if self._driver is not None and self._driver.is_connected():
                     self._driver.disconnect()
-                self._driver = DummyStage()
+                self._driver = self._create_driver(driver, self._port)
                 self._driver.connect()
+                self._driver_name = driver
         except StageConnectionError as e:
             return {"status": "error", "error": str(e)}
+        except Exception as e:
+            return {"status": "error", "error": f"Connect failed for {driver!r}: {e}"}
 
-        return {"status": "ok", "dummy": True, "port": self._port}
+        return {"status": "ok", "driver": self._driver_name, "port": self._port}
 
     def _disconnect(self) -> dict[str, Any]:
         with self._lock:
@@ -92,7 +90,7 @@ class StageController:
         return {"status": "ok"}
 
     def _set_origin(self) -> dict[str, Any]:
-        ok, err = self._ensure_dummy_connected()
+        ok, err = self._ensure_connected()
         if not ok:
             return err  # type: ignore[return-value]
         try:
@@ -107,14 +105,15 @@ class StageController:
         x_um, y_um, z_um = self._position_um()
         moving = False
         connected = False
-        if self._dummy_mode and self._driver is not None:
+        if self._driver is not None:
             connected = self._driver.is_connected()
             if connected:
                 moving = self._driver.is_moving()
         return {
             "status": "ok",
             "connected": connected,
-            "dummy": self._dummy_mode,
+            "dummy": self._driver_name in ("dummy", "mock"),
+            "driver": self._driver_name,
             "x_um": x_um,
             "y_um": y_um,
             "z_um": z_um,
@@ -123,7 +122,7 @@ class StageController:
         }
 
     def _home(self, axes: list | None) -> dict[str, Any]:
-        ok, err = self._ensure_dummy_connected()
+        ok, err = self._ensure_connected()
         if not ok:
             return err  # type: ignore[return-value]
         if axes is None:
@@ -135,7 +134,7 @@ class StageController:
         return self._move_absolute({"x": tx, "y": ty, "z": tz})
 
     def _move_absolute(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        ok, err = self._ensure_dummy_connected()
+        ok, err = self._ensure_connected()
         if not ok:
             return err  # type: ignore[return-value]
         px, py, pz = self._position_um()
@@ -151,7 +150,7 @@ class StageController:
         return {"status": "ok"}
 
     def _move_relative(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        ok, err = self._ensure_dummy_connected()
+        ok, err = self._ensure_connected()
         if not ok:
             return err  # type: ignore[return-value]
         dx = float(cmd.get("dx", 0.0))
@@ -166,7 +165,7 @@ class StageController:
         return {"status": "ok"}
 
     def _wait_stop(self, timeout: float) -> dict[str, Any]:
-        ok, err = self._ensure_dummy_connected()
+        ok, err = self._ensure_connected()
         if not ok:
             return err  # type: ignore[return-value]
         deadline = time.time() + max(0.0, timeout)
@@ -181,7 +180,7 @@ class StageController:
 
     def _position_um(self) -> tuple[float, float, float]:
         with self._lock:
-            if not self._dummy_mode or self._driver is None or not self._driver.is_connected():
+            if self._driver is None or not self._driver.is_connected():
                 return (0.0, 0.0, 0.0)
             try:
                 x, y, z = self._driver.get_position()
@@ -193,7 +192,7 @@ class StageController:
         x_um, y_um, z_um = self._position_um()
         moving = False
         connected = False
-        if self._dummy_mode and self._driver is not None:
+        if self._driver is not None:
             connected = self._driver.is_connected()
             if connected:
                 moving = self._driver.is_moving()
@@ -203,9 +202,33 @@ class StageController:
             "z_um": z_um,
             "moving": moving,
             "connected": connected,
+            "driver": self._driver_name,
         }
 
     def cleanup(self) -> None:
         with self._lock:
             if self._driver is not None and self._driver.is_connected():
                 self._driver.disconnect()
+
+    @staticmethod
+    def _normalize_driver_name(driver: str) -> str:
+        aliases = {
+            "mock": "dummy",
+            "hsc-103": "hsc103",
+        }
+        return aliases.get(driver, driver)
+
+    def _create_driver(self, driver: str, port: str) -> AbstractStage:
+        if driver == "dummy":
+            return DummyStage()
+        if driver == "prior":
+            from stage_node.drivers.prior_sdk import PriorSdk
+
+            return PriorSdk(com_port_str=port)
+        if driver == "hsc103":
+            from stage_node.drivers.hsc103_stage import Hsc103Stage
+
+            return Hsc103Stage(com_port_str=port)
+        raise StageConnectionError(
+            f"Driver not implemented: {driver!r} (use dummy|prior|hsc103)"
+        )

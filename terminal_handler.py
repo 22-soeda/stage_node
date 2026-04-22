@@ -9,7 +9,7 @@ class TerminalHandler(TerminalHandlerBase):
     HELP_LINES = [
         "Stage Node  (DummyStage virtual | future hardware)",
         "─" * 42,
-        "connect [dummy|mock] [port]                 mock is alias for dummy",
+        "connect [dummy|mock|prior|hsc103|hsc-103] [port]",
         "disconnect",
         "status",
         "home  OR  home <0|1> <0|1> <0|1>          axes x y z (1=homing)",

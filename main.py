@@ -3,7 +3,8 @@ stage_node entry: PUB position + REP commands + CLI (>>> prompt).
 
   uv run python -m stage_node.main --interval-ms 200
 
-仮想ステージ (DummyStage) は既定で有効。実装予定の実機のみ使う場合は ``--no-dummy``。
+仮想ステージ (DummyStage) は既定で有効。実機を使う場合は起動後 `connect prior COMx` または
+`connect hsc103 COMx` を実行してください（`--no-dummy` なら未接続で起動）。
 
 After launch, type ``connect dummy`` (optional; default is already connected), ``status``, ``move_abs ...``.
 """
@@ -18,9 +19,9 @@ def main() -> None:
     parser.add_argument(
         "--no-dummy",
         action="store_true",
-        help="Disable DummyStage (real hardware; not yet implemented)",
+        help="Disable auto-connect DummyStage at startup",
     )
-    parser.add_argument("--port", default="COM3", help="Serial port when using hardware (with --no-dummy)")
+    parser.add_argument("--port", default="COM3", help="Default serial port for connect command")
     parser.add_argument("--interval-ms", type=int, default=200, help="PUB interval")
     args = parser.parse_args()
 
